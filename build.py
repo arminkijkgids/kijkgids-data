@@ -91,7 +91,7 @@ def norm(t):
 
 
 def wedstrijd(p):
-    """Geeft 'wk', 'ek', 'eredivisie', 'nations' of None — zelfde regels als de app."""
+    """Geeft 'wk', 'ek', 'eredivisie', 'nations', 'europa' of None — zelfde regels als de app."""
     t, s = norm(p["t"]), norm(p.get("sub", ""))
     alles = t + " " + s
     if not ("Voetbal" in p["c"] or re.search(r"soccer|fifa|voetbal|uefa", t)):
@@ -104,7 +104,26 @@ def wedstrijd(p):
     if re.search(r"euro(pean)? championship|europees kampioenschap|(^| )ek( |$)|euro 20\d\d", t): return "ek"
     if "eredivisie" in t and not re.search(r"vrouwen|women", t): return "eredivisie"
     if "nations league" in t: return "nations"
+    # Europees clubvoetbal (UEFA); geen Aziatische AFC, geen magazines; alleen echte wedstrijden ("Club - Club")
+    if re.search(r"champions league|europa league|conference league", t) and not re.search(r"(^| )afc( |$)|magazine|sportstudio", t) and " - " in p.get("sub", ""):
+        return "europa"
     return None
+
+
+def label(p):
+    """Bij WK/EK: kwalificatie en vrouwen in de titel zetten, bv. ' (WK-kwalificatie · Vrouwen)'."""
+    soort = p.get("_soort")
+    if soort == "europa":
+        t = norm(p["t"])
+        naam = "Europa League" if "europa league" in t else "Conference League" if "conference league" in t else "Champions League"
+        return " (" + naam + (" · Vrouwen" if re.search(r"women|vrouwen", t) else "") + ")"
+    if soort not in ("wk", "ek"):
+        return ""
+    t = norm(p["t"] + " " + p.get("sub", ""))
+    kwal, vrouw = bool(re.search(r"qualif|kwalificatie", t)), bool(re.search(r"women|vrouwen|leeuwinnen", t))
+    if not (kwal or vrouw):
+        return ""
+    return " (" + soort.upper() + ("-kwalificatie" if kwal else "") + (" · Vrouwen" if vrouw else "") + ")"
 
 
 def ics_tekst(t):
@@ -119,7 +138,7 @@ def maak_agenda(naam, programmas, pad):
     for p in programmas:
         start = datetime.fromisoformat(p["s"]).astimezone(timezone.utc)
         eind = datetime.fromisoformat(p["e"]).astimezone(timezone.utc)
-        titel = (p.get("sub") or p["t"]) + " · " + p["z"]
+        titel = (p.get("sub") or p["t"]) + label(p) + " · " + p["z"]
         uid = hashlib.sha1((norm(p["t"]) + norm(p.get("sub", "")) + p["s"]).encode()).hexdigest()
         regels += ["BEGIN:VEVENT", "UID:" + uid + "@kijkgids", "DTSTAMP:" + nu,
                    "DTSTART:" + start.strftime("%Y%m%dT%H%M%SZ"), "DTEND:" + eind.strftime("%Y%m%dT%H%M%SZ"),
@@ -155,12 +174,52 @@ def voetbalagenda(per_dag):
     # Is de eerste uitzending 's nachts of 's ochtends (01–10 uur), dan is het een herhaling van een eerder gespeelde wedstrijd
     alles = sorted((p for p in eerste.values() if not 1 <= int(p["s"][11:13]) < 10), key=lambda p: p["s"])
     oranje = lambda p: re.search(r"(^| )nederland( |$)", norm(p.get("sub", "")))
-    maak_agenda("Kijkgids · Voetbal", [p for p in alles if p["_soort"] in ("wk", "ek", "eredivisie")], f"{SITE}/voetbal.ics")
+    maak_agenda("Kijkgids · Voetbal", [p for p in alles if p["_soort"] in ("wk", "ek", "eredivisie", "europa")], f"{SITE}/voetbal.ics")
     maak_agenda("Kijkgids · Feyenoord & Oranje",
                 [p for p in alles if "feyenoord" in norm(p.get("sub", "") + " " + p.get("d", "")) or (p["_soort"] in ("wk", "ek", "nations") and oranje(p))],
                 f"{SITE}/feyenoord-oranje.ics")
     for p in alles:
         p.pop("_soort", None)
+
+
+# ---------- Eredivisie: stand, uitslagen, programma (football-data.org, gratis) ----------
+FD_KEY = os.environ.get("FOOTBALL_DATA_KEY", "").strip()
+FD_BEWAAR = "data/eredivisie.json"   # laatste goede versie, voor als het ophalen een keer mislukt
+
+
+def fd(pad):
+    req = urllib.request.Request("https://api.football-data.org/v4/" + pad, headers={"X-Auth-Token": FD_KEY})
+    return json.load(urllib.request.urlopen(req, timeout=60))
+
+
+def eredivisie():
+    """Schrijft site/eredivisie.json. Zonder sleutel of bij een fout: de vorige versie blijft staan."""
+    uit = None
+    if FD_KEY:
+        try:
+            st, wd = fd("competitions/DED/standings"), fd("competitions/DED/matches")
+            tabel = next(t["table"] for t in st["standings"] if t.get("type") == "TOTAL")
+            team = lambda t: {"id": t["id"], "n": t.get("shortName") or t["name"], "c": t.get("crest", "")}
+            uit = {
+                "bijgewerkt": datetime.now(NL).isoformat(timespec="minutes"),
+                "speelronde": st.get("season", {}).get("currentMatchday"),
+                "stand": [{"pos": r["position"], **team(r["team"]), "g": r["playedGames"], "w": r["won"], "gl": r["draw"],
+                           "v": r["lost"], "dv": r["goalsFor"], "dt": r["goalsAgainst"], "ds": r["goalDifference"],
+                           "p": r["points"], "vorm": r.get("form") or ""} for r in tabel],
+                "wedstrijden": [{"t": m["utcDate"], "r": m.get("matchday"), "st": m["status"],
+                                 "th": m["homeTeam"]["id"], "tu": m["awayTeam"]["id"],
+                                 "h": (m.get("score") or {}).get("fullTime", {}).get("home"),
+                                 "u": (m.get("score") or {}).get("fullTime", {}).get("away")}
+                                for m in wd["matches"] if m["homeTeam"].get("id") and m["awayTeam"].get("id")],
+            }
+            json.dump(uit, open(FD_BEWAAR, "w"), ensure_ascii=False, separators=(",", ":"))
+            print(f"Eredivisie: {len(uit['stand'])} clubs, {len(uit['wedstrijden'])} wedstrijden")
+        except Exception as e:
+            print("Eredivisie ophalen mislukt, vorige versie blijft:", e)
+    if uit is None and os.path.exists(FD_BEWAAR):
+        uit = json.load(open(FD_BEWAAR))
+    if uit:
+        json.dump(uit, open(f"{SITE}/eredivisie.json", "w"), ensure_ascii=False, separators=(",", ":"))
 
 
 def main():
@@ -190,6 +249,7 @@ def main():
     for f in os.listdir(SITE):
         os.remove(f"{SITE}/{f}")
     voetbalagenda(per_dag)
+    eredivisie()
     dagen = sorted(per_dag)
     for dag in dagen:
         lijst = sorted(per_dag[dag], key=lambda p: (p["s"], p["z"]))
