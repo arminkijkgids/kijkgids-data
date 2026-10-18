@@ -2,9 +2,10 @@ name: Tv-gids bijwerken
 
 on:
   schedule:
-    - cron: "17 3 * * *"
-    - cron: "17 15 * * *"
-  workflow_dispatch:
+    - cron: "17 3 * * *"    # elke dag 05:17 Nederlandse zomertijd (03:17 UTC)
+    - cron: "17 15 * * *"   # en 17:17, voor late wijzigingen
+    - cron: "17 21 * * *"   # en 23:17, voor de uitslagen van de avond
+  workflow_dispatch:         # knop 'Run workflow' om het met de hand te starten
 
 permissions:
   contents: write
@@ -22,18 +23,25 @@ jobs:
       name: github-pages
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Tv-gids ophalen en verkleinen
         run: python build.py
+        env:
+          FOOTBALL_DATA_KEY: ${{ secrets.FOOTBALL_DATA_KEY }}
+
       - name: Afgelopen dagen bewaren
         run: |
           git config user.name "kijkgids-bot"
           git config user.email "kijkgids-bot@users.noreply.github.com"
           git add data
           git diff --cached --quiet || git commit -m "Archief bijgewerkt"
+          git pull --rebase origin main || true
           git push
+
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
